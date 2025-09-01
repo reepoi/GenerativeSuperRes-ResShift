@@ -89,7 +89,7 @@ degradation:
   gray_noise_prob2: 0.4
   jpeg_range2: [30, 95]
 
-  gt_size: 256 
+  gt_size: 256
   resize_back: False
   use_sharp: False
 
@@ -99,9 +99,9 @@ data:
     params:
       dir_paths: []
       txt_file_path: [
-                      '/mnt/sfs-common/zsyue/database/ImageNet/files_txt/path_train_all.txt', 
+                      '/mnt/sfs-common/zsyue/database/ImageNet/files_txt/path_train_all.txt',
                       '/mnt/sfs-common/zsyue/database/FFHQ/files_txt/files256.txt',
-                     ] 
+                     ]
       im_exts: ['JPEG', ]
       io_backend:
         type: disk
@@ -146,26 +146,26 @@ data:
 
 train:
   # learning rate
-  lr: 5e-5                      # learning rate 
-  lr_min: 2e-5                      # learning rate 
+  lr: 5e-5                      # learning rate
+  lr_min: 2e-5                      # learning rate
   lr_schedule: ~
   warmup_iterations: 5000
   # dataloader
-  batch: [64, 8]                
+  batch: [64, 8]
   microbatch: 8
   num_workers: 4
-  prefetch_factor: 2            
+  prefetch_factor: 2
   # optimization settings
-  weight_decay: 0               
+  weight_decay: 0
   ema_rate: 0.999
   iterations: 300000            # total iterations
   # save logging
-  save_freq: 10000              
+  save_freq: 10000
   log_freq: [200, 2000, 1]         # [training loss, training images, val images]
   local_logging: True           # manually save images
   tf_logging: False             # tensorboard logging
   # validation settings
-  use_ema_val: True            
+  use_ema_val: True
   val_freq: ${train.save_freq}
   val_y_channel: True
   val_resolution: ${model.params.lq_size}
