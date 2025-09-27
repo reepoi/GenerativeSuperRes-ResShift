@@ -1,6 +1,7 @@
 import random
 import numpy as np
 from pathlib import Path
+import scipy
 from scipy.io import loadmat
 
 import cv2
@@ -8,6 +9,7 @@ import torch
 from functools import partial
 import torchvision as thv
 from torch.utils.data import Dataset
+import torch.nn as nn
 
 from utils import util_sisr
 from utils import util_image
@@ -123,6 +125,8 @@ def get_transforms(transform_type, kwargs):
 def create_dataset(dataset_config):
     if dataset_config['type'] == 'gfpgan':
         dataset = FFHQDegradationDataset(dataset_config['params'])
+    elif dataset_config['type'] == 'navier_stokes_gled':
+        dataset = NavierStokesGLED(dataset_config['params'])
     elif dataset_config['type'] == 'base':
         dataset = BaseData(**dataset_config['params'])
     elif dataset_config['type'] == 'bsrgan':
@@ -258,6 +262,82 @@ class PairedData(Dataset):
 
     def reset_dataset(self):
         self.file_paths = random.sample(self.file_paths_all, self.length)
+
+
+class DownsamplerGaussian:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        # 512 to 32
+        # self.scale = 16
+        # self.kernel_width = 33
+        # self.padding = [16] * 4
+        # kernel_size = 33
+        # 256 to 64
+        # self.scale = 16
+        # self.kernel_width = 9
+        # self.padding = [8] * 4
+        # kernel_size = 9
+        # 256 to 16
+        # self.scale = 4
+        # self.kernel_width = 5
+        # self.padding = [4] * 4
+        # kernel_size = 5
+        self.downsampler = getattr(nn, f'Conv{2}d')(
+            in_channels=2,  #self.cfg.solution_dimension,
+            out_channels=2,  #self.cfg.solution_dimension,
+            groups=2,  #self.cfg.solution_dimension,
+            kernel_size=cfg['kernel_size'],
+            bias=False,
+            stride=cfg['kernel_size'] // 2,
+            padding=cfg['kernel_size'] // 2,
+            padding_mode='replicate',
+        )
+        spatial_dims = self.downsampler.weight.shape[2:]
+        self.downsampler.weight = nn.Parameter(
+            self.init_gaussian_kernel(spatial_dims, 0.4 * (cfg['kernel_size'] // 2)).expand(
+                self.downsampler.out_channels, 1, *spatial_dims
+            ).clone(),
+            requires_grad=False,
+        )
+
+    def __call__(self, *args, **kwargs):
+        return self.micro_to_macro(*args, **kwargs)
+
+    def micro_to_macro(self, batch_micro):
+        return self.downsampler(batch_micro)
+
+    @staticmethod
+    def init_gaussian_kernel(kernel_size, sigma, device=None, dtype=torch.float32):
+        kernel = np.zeros(kernel_size)
+        # set element at the middle to one, a dirac delta
+        kernel[tuple(s//2 for s in kernel_size)] = 1.
+        # gaussian-smooth the dirac, resulting in a gaussian filter mask
+        kernel = torch.from_numpy(scipy.ndimage.gaussian_filter(kernel, sigma))
+        return kernel[[None] * kernel.ndim].to(device=device, dtype=dtype)
+
+
+class NavierStokesGLED(Dataset):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+        dim = 512
+        cut = slice(dim // 2 - dim //4, dim // 2 + dim // 4)
+        self.trajectories = torch.load('/home/ttransue/out/g_led/data/data_cat_f32.pt')[0, -10:, :, cut, cut]
+        self.downsampler = DownsamplerGaussian(cfg['downsampler'])
+
+    def __len__(self):
+        return len(self.trajectories)
+
+    def __getitem__(self, idx):
+        im_hq = self.trajectories[idx]
+        im_lq = self.downsampler(im_hq)
+        # im_lq = nn.Upsample(
+        #     size=im_hq.shape[-2:],
+        #     mode='bilinear',
+        # )(im_lq[None]).squeeze(0)
+
+        return dict(lq=im_lq, gt=im_hq)
+
 
 class BSRGANLightDegImageNet(Dataset):
     def __init__(self,

@@ -16,6 +16,7 @@ from utils import util_image
 from utils import util_common
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -100,11 +101,11 @@ class BaseSampler:
         self.model = model.eval()
 
         # autoencoder model
-        if self.configs.autoencoder.params.get("lora_tune_decoder", False):
-            lora_vae_state = ckpt['lora_vae']
-        elif self.configs.autoencoder.get("tune_decoder", False):
-            vae_state = ckpt['vae']
         if self.configs.autoencoder is not None:
+            if self.configs.autoencoder.params.get("lora_tune_decoder", False):
+                lora_vae_state = ckpt['lora_vae']
+            elif self.configs.autoencoder.get("tune_decoder", False):
+                vae_state = ckpt['vae']
             params = self.configs.autoencoder.get('params', dict)
             autoencoder = util_common.get_obj_from_str(self.configs.autoencoder.target)(**params)
             autoencoder.cuda()
@@ -174,6 +175,10 @@ class ResShiftSampler(BaseSampler):
 
         offset = self.padding_offset
         ori_h, ori_w = y0.shape[2:]
+        y0 = nn.Upsample(
+            size=[offset, offset],
+            mode='bilinear',
+        )(y0)
         if not (ori_h % offset == 0 and ori_w % offset == 0):
             flag_pad = True
             pad_h = (math.ceil(ori_h / offset)) * offset - ori_h
@@ -349,6 +354,94 @@ class ResShiftSampler(BaseSampler):
             im_sr = util_image.tensor2img(im_sr_tensor, rgb2bgr=True, min_max=(0.0, 1.0))
             im_path = out_path / f"{in_path.stem}.png"
             util_image.imwrite(im_sr, im_path, chn='bgr', dtype_in='uint8')
+
+        self.write_log(f"Processing done, enjoy the results in {str(out_path)}")
+
+    def inference_navier_stokes(self, out_path, bs=1, noise_repeat=False):
+        '''
+        Inference demo.
+        Input:
+            in_path: str, folder or image path for LQ image
+            out_path: str, folder save the results
+            bs: int, default bs=1, bs % num_gpus == 0
+            mask_path: image mask for inpainting
+        '''
+        def _process_per_image(im_lq_tensor, mask=None):
+            '''
+            Input:
+                im_lq_tensor: b x c x h x w, torch tensor, [-1, 1], RGB
+                mask: image mask for inpainting, [-1, 1], 1 for unknown area
+            Output:
+                im_sr: h x w x c, numpy array, [0,1], RGB
+            '''
+
+            context = torch.cuda.amp.autocast if self.use_amp else nullcontext
+            if im_lq_tensor.shape[2] > self.chop_size or im_lq_tensor.shape[3] > self.chop_size:
+                if mask is not None:
+                    im_lq_tensor = torch.cat([im_lq_tensor, mask], dim=1)
+                im_spliter = ImageSpliterTh(
+                        im_lq_tensor,
+                        self.chop_size,
+                        stride=self.chop_stride,
+                        sf=self.sf,
+                        extra_bs=self.chop_bs,
+                        )
+                for im_lq_pch, index_infos in im_spliter:
+                    if mask is not None:
+                        im_lq_pch, mask_pch = im_lq_pch[:, :-1], im_lq_pch[:, -1:,]
+                    else:
+                        mask_pch = None
+                    with context():
+                        im_sr_pch = self.sample_func(
+                                im_lq_pch,
+                                noise_repeat=noise_repeat,
+                                mask=mask_pch,
+                                )     # 1 x c x h x w, [-1, 1]
+                    im_spliter.update(im_sr_pch, index_infos)
+                im_sr_tensor = im_spliter.gather()
+            else:
+                # print(im_lq_tensor.shape)
+                with context():
+                    im_sr_tensor = self.sample_func(
+                            im_lq_tensor,
+                            noise_repeat=noise_repeat,
+                            mask=mask,
+                            )     # 1 x c x h x w, [-1, 1]
+
+            im_sr_tensor = im_sr_tensor * 0.5 + 0.5
+            return im_sr_tensor
+
+        out_path = Path(out_path) if not isinstance(out_path, Path) else out_path
+
+        if self.rank == 0:
+            if not out_path.exists():
+                out_path.mkdir(parents=True)
+
+        if self.num_gpus > 1:
+            dist.barrier()
+
+        data_config = self.configs.data.train
+        dataset = create_dataset(data_config)
+        dataloader = torch.utils.data.DataLoader(
+                dataset,
+                batch_size=bs,
+                shuffle=False,
+                drop_last=False,
+                )
+        for data in dataloader:
+            micro_batchsize = math.ceil(bs / self.num_gpus)
+            ind_start = self.rank * micro_batchsize
+            ind_end = ind_start + micro_batchsize
+            micro_data = {key:value[ind_start:ind_end] for key,value in data.items()}
+
+            if micro_data['lq'].shape[0] > 0:
+                results = _process_per_image(
+                        micro_data['lq'].cuda(),
+                        mask=micro_data['mask'].cuda() if 'mask' in micro_data else None,
+                        )    # b x h x w x c, [0, 1], RGB
+                torch.save(results, out_path/'output.pt')
+        if self.num_gpus > 1:
+            dist.barrier()
 
         self.write_log(f"Processing done, enjoy the results in {str(out_path)}")
 

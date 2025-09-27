@@ -195,6 +195,12 @@ class TrainerBase:
         self.optimizer = torch.optim.AdamW(self.model.parameters(),
                                            lr=self.configs.train.lr,
                                            weight_decay=self.configs.train.weight_decay)
+        if self.configs.train.lr_schedule == 'cosin':
+            self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer=self.optimizer,
+                    T_max=self.configs.train.iterations - self.configs.train.warmup_iterations,
+                    eta_min=self.configs.train.lr_min,
+                    )
 
         # amp settings
         self.amp_scaler = amp.GradScaler() if self.configs.train.use_amp else None
@@ -257,13 +263,13 @@ class TrainerBase:
             sampler = None
         dataloaders = {'train': _wrap_loader(udata.DataLoader(
                         datasets['train'],
-                        batch_size=self.configs.train.batch[0] // self.num_gpus,
+                        batch_size=1,#self.configs.train.batch[0] // self.num_gpus,
                         shuffle=False if self.num_gpus > 1 else True,
                         drop_last=True,
-                        num_workers=min(self.configs.train.num_workers, 4),
-                        pin_memory=True,
-                        prefetch_factor=self.configs.train.get('prefetch_factor', 2),
-                        worker_init_fn=my_worker_init_fn,
+                        # num_workers=min(self.configs.train.num_workers, 4),
+                        # pin_memory=True,
+                        # prefetch_factor=self.configs.train.get('prefetch_factor', 2),
+                        # worker_init_fn=my_worker_init_fn,
                         sampler=sampler,
                         ))}
         if hasattr(self.configs.data, 'val') and self.rank == 0:
@@ -307,13 +313,23 @@ class TrainerBase:
         self.model.train()
         num_iters_epoch = math.ceil(len(self.datasets['train']) / self.configs.train.batch[0])
         for ii in range(self.iters_start, self.configs.train.iterations):
+            # if self.rank == 0:
+            #     self.logger.info(f'Taos: iter {ii}')
             self.current_iters = ii + 1
 
             # prepare data
+            # if self.rank == 0:
+                # self.logger.info('Taos: before prepare_data')
             data = self.prepare_data(next(self.dataloaders['train']))
+            # if self.rank == 0:
+            #     self.logger.info('Taos: after prepare_data')
 
             # training phase
+            # if self.rank == 0:
+            #     self.logger.info('Taos: before training_step')
             self.training_step(data)
+            # if self.rank == 0:
+            #     self.logger.info('Taos: after training_step')
 
             # validation phase
             if 'val' in self.dataloaders and (ii+1) % self.configs.train.get('val_freq', 10000) == 0:
@@ -434,6 +450,405 @@ class TrainerBase:
         if self.rank == 0:
             self.logger.info('Loaded Done')
 
+class TrainerNavierStokes(TrainerBase):
+    def setup_optimizaton(self):
+        super().setup_optimizaton()
+        if self.configs.train.lr_schedule == 'cosin':
+            self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer=self.optimizer,
+                    T_max=self.configs.train.iterations - self.configs.train.warmup_iterations,
+                    eta_min=self.configs.train.lr_min,
+                    )
+
+    def logging_image(self, im_tensor, tag, phase, add_global_step=False, nrow=8):
+        """
+        Args:
+            im_tensor: b x c x h x w tensor
+            im_tag: str
+            phase: 'train' or 'val'
+            nrow: number of displays in each row
+        """
+        assert self.tf_logging or self.local_logging
+        # im_tensor = vutils.make_grid(im_tensor, nrow=nrow, normalize=True, scale_each=True) # c x H x W
+        if self.local_logging:
+            im_path = str(self.image_dir / phase / f"{tag}-{self.log_step_img[phase]}.pt")
+            torch.save(im_tensor.cpu(), im_path)
+        if add_global_step:
+            self.log_step_img[phase] += 1
+
+    def build_model(self):
+        super().build_model()
+        if self.rank == 0 and hasattr(self.configs.train, 'ema_rate'):
+            self.ema_ignore_keys.extend([x for x in self.ema_state.keys() if 'relative_position_index' in x])
+
+        # autoencoder
+        if self.configs.autoencoder is not None:
+            ckpt = torch.load(self.configs.autoencoder.ckpt_path, map_location=f"cuda:{self.rank}")
+            if self.rank == 0:
+                self.logger.info(f"Restoring autoencoder from {self.configs.autoencoder.ckpt_path}")
+            params = self.configs.autoencoder.get('params', dict)
+            autoencoder = util_common.get_obj_from_str(self.configs.autoencoder.target)(**params)
+            autoencoder.cuda()
+            if self.configs.autoencoder.tune_decoder:
+                self.load_model(autoencoder, self.configs.autoencoder.ckpt_path, tag='autoencoder', strict=True)
+                if self.rank == 0:
+                    num_params = 0
+                    for key, value in autoencoder.named_parameters():
+                        if 'decoder' in key or 'post_quant_conv' in key:
+                            num_params += value.numel()
+                        else:
+                            value.requires_grad = False
+                    self.logger.info(f'Finetuning Decoder module: {num_params/10**6:.2f}M...')
+            else:
+                self.load_model(autoencoder, self.configs.autoencoder.ckpt_path, tag='autoencoder', strict=True)
+                self.freeze_model(autoencoder)
+                autoencoder.eval()
+            if self.configs.train.compile.flag:
+                if self.rank == 0:
+                    self.logger.info("Begin compiling autoencoder model...")
+                autoencoder = torch.compile(autoencoder, mode=self.configs.train.compile.mode)
+                if self.rank == 0:
+                    self.logger.info("Compiling Done")
+            self.autoencoder = autoencoder
+        else:
+            self.autoencoder = None
+
+        if self.configs.autoencoder is not None and (
+            self.configs.autoencoder.params.lora_tune_decoder
+            or self.configs.autoencoder.tune_decoder
+        ):
+            self.freeze_model(self.model)
+
+        # LPIPS metric
+        if hasattr(self.configs, 'lpips'):
+            lpips_net = self.configs.lpips.net
+        else:
+            lpips_net = 'vgg'
+        if self.rank == 0:
+            self.logger.info(f"Loading LIIPS Metric: {lpips_net}...")
+        lpips_loss = lpips.LPIPS(net=lpips_net).to(f"cuda:{self.rank}")
+        for params in lpips_loss.parameters():
+            params.requires_grad_(False)
+        lpips_loss.eval()
+        if self.configs.train.compile.flag:
+            if self.rank == 0:
+                self.logger.info("Begin compiling LPIPS Metric...")
+            lpips_loss = torch.compile(lpips_loss, mode=self.configs.train.compile.mode)
+            if self.rank == 0:
+                self.logger.info("Compiling Done")
+        self.lpips_loss = lpips_loss
+
+        params = self.configs.diffusion.get('params', dict)
+        self.base_diffusion = util_common.get_obj_from_str(self.configs.diffusion.target)(**params)
+
+    @torch.no_grad()
+    def _dequeue_and_enqueue(self):
+        """It is the training pair pool for increasing the diversity in a batch.
+
+        Batch processing limits the diversity of synthetic degradations in a batch. For example, samples in a
+        batch could not have different resize scaling factors. Therefore, we employ this training pair pool
+        to increase the degradation diversity in a batch.
+        """
+        # initialize
+        b, c, h, w = self.lq.size()
+        if not hasattr(self, 'queue_size'):
+            self.queue_size = self.configs.degradation.get('queue_size', b*10)
+        if not hasattr(self, 'queue_lr'):
+            assert self.queue_size % b == 0, f'queue size {self.queue_size} should be divisible by batch size {b}'
+            self.queue_lr = torch.zeros(self.queue_size, c, h, w).cuda()
+            _, c, h, w = self.gt.size()
+            self.queue_gt = torch.zeros(self.queue_size, c, h, w).cuda()
+            self.queue_ptr = 0
+        if self.queue_ptr == self.queue_size:  # the pool is full
+            # do dequeue and enqueue
+            # shuffle
+            idx = torch.randperm(self.queue_size)
+            self.queue_lr = self.queue_lr[idx]
+            self.queue_gt = self.queue_gt[idx]
+            # get first b samples
+            lq_dequeue = self.queue_lr[0:b, :, :, :].clone()
+            gt_dequeue = self.queue_gt[0:b, :, :, :].clone()
+            # update the queue
+            self.queue_lr[0:b, :, :, :] = self.lq.clone()
+            self.queue_gt[0:b, :, :, :] = self.gt.clone()
+
+            self.lq = lq_dequeue
+            self.gt = gt_dequeue
+        else:
+            # only do enqueue
+            self.queue_lr[self.queue_ptr:self.queue_ptr + b, :, :, :] = self.lq.clone()
+            self.queue_gt[self.queue_ptr:self.queue_ptr + b, :, :, :] = self.gt.clone()
+            self.queue_ptr = self.queue_ptr + b
+
+    @torch.no_grad()
+    def prepare_data(self, data, dtype=torch.float32, realesrgan=None, phase='train'):
+        if phase == 'val':
+            offset = self.configs.train.get('val_resolution', 256)
+            for key, value in data.items():
+                h, w = value.shape[2:]
+                if h > offset and w > offset:
+                    h_end = int((h // offset) * offset)
+                    w_end = int((w // offset) * offset)
+                    data[key] = value[:, :, :h_end, :w_end]
+                else:
+                    h_pad = math.ceil(h / offset) * offset - h
+                    w_pad = math.ceil(w / offset) * offset - w
+                    padding_mode = self.configs.train.get('val_padding_mode', 'reflect')
+                    data[key] = F.pad(value, pad=(0, w_pad, 0, h_pad), mode=padding_mode)
+            return {key:value.cuda().to(dtype=dtype) for key, value in data.items()}
+        else:
+            # if self.rank == 0:
+            #     self.logger.info('Taos: before moving data to cuda')
+            return {key:value.cuda().to(dtype=dtype) for key, value in data.items()}
+
+    def backward_step(self, dif_loss_wrapper, micro_data, num_grad_accumulate, tt):
+        context = torch.cuda.amp.autocast if self.configs.train.use_amp else nullcontext
+        with context():
+            losses, z_t, z0_pred = dif_loss_wrapper()
+            losses['loss'] = losses['mse']
+            loss = losses['loss'].mean() / num_grad_accumulate
+        if self.amp_scaler is None:
+            loss.backward()
+        else:
+            self.amp_scaler.scale(loss).backward()
+
+        return losses, z0_pred, z_t
+
+    def training_step(self, data):
+        current_batchsize = data['gt'].shape[0]
+        micro_batchsize = self.configs.train.microbatch
+        num_grad_accumulate = math.ceil(current_batchsize / micro_batchsize)
+
+        for jj in range(0, current_batchsize, micro_batchsize):
+            micro_data = {key:value[jj:jj+micro_batchsize,] for key, value in data.items()}
+            last_batch = (jj+micro_batchsize >= current_batchsize)
+            tt = torch.randint(
+                    0, self.base_diffusion.num_timesteps,
+                    size=(micro_data['gt'].shape[0],),
+                    device=f"cuda:{self.rank}",
+                    )
+            # latent_downsamping_sf = 2**(len(self.configs.autoencoder.params.ddconfig.ch_mult) - 1)
+            latent_downsamping_sf = 1
+            latent_resolution = micro_data['gt'].shape[-1] // latent_downsamping_sf
+            # if 'autoencoder' in self.configs:
+            if self.configs.autoencoder is not None:
+                noise_chn = self.configs.autoencoder.params.embed_dim
+            else:
+                noise_chn = micro_data['gt'].shape[1]
+            noise = torch.randn(
+                    size= (micro_data['gt'].shape[0], noise_chn,) + (latent_resolution, ) * 2,
+                    device=micro_data['gt'].device,
+                    )
+            if self.configs.model.params.cond_lq:
+                model_kwargs = {'lq':micro_data['lq'],}
+                if 'mask' in micro_data:
+                    model_kwargs['mask'] = micro_data['mask']
+            else:
+                model_kwargs = None
+            compute_losses = functools.partial(
+                self.base_diffusion.training_losses,
+                self.model,
+                micro_data['gt'],
+                micro_data['lq'],
+                tt,
+                first_stage_model=self.autoencoder,
+                model_kwargs=model_kwargs,
+                noise=noise,
+            )
+            if last_batch or self.num_gpus <= 1:
+                losses, z0_pred, z_t = self.backward_step(compute_losses, micro_data, num_grad_accumulate, tt)
+            else:
+                with self.model.no_sync():
+                    losses, z0_pred, z_t = self.backward_step(compute_losses, micro_data, num_grad_accumulate, tt)
+
+            # make logging
+            if last_batch:
+                self.log_step_train(losses, tt, micro_data, z_t, z0_pred.detach())
+
+        if self.configs.train.use_amp:
+            self.amp_scaler.step(self.optimizer)
+            self.amp_scaler.update()
+        else:
+            self.optimizer.step()
+
+        # grad zero
+        self.model.zero_grad()
+
+        if hasattr(self.configs.train, 'ema_rate'):
+            self.update_ema_model()
+
+    def adjust_lr(self, current_iters=None):
+        base_lr = self.configs.train.lr
+        warmup_steps = self.configs.train.warmup_iterations
+        current_iters = self.current_iters if current_iters is None else current_iters
+        if current_iters <= warmup_steps:
+            for params_group in self.optimizer.param_groups:
+                params_group['lr'] = (current_iters / warmup_steps) * base_lr
+        else:
+            if hasattr(self, 'lr_scheduler'):
+                self.lr_scheduler.step()
+
+    def log_step_train(self, loss, tt, batch, z_t, z0_pred, phase='train'):
+        '''
+        param loss: a dict recording the loss informations
+        param tt: 1-D tensor, time steps
+        '''
+        if self.rank == 0:
+            chn = batch['gt'].shape[1]
+            num_timesteps = self.base_diffusion.num_timesteps
+            record_steps = [1, (num_timesteps // 2) + 1, num_timesteps]
+            if self.current_iters % self.configs.train.log_freq[0] == 1:
+                self.loss_mean = {key:torch.zeros(size=(len(record_steps),), dtype=torch.float64)
+                                  for key in loss.keys()}
+                self.loss_count = torch.zeros(size=(len(record_steps),), dtype=torch.float64)
+            for jj in range(len(record_steps)):
+                for key, value in loss.items():
+                    index = record_steps[jj] - 1
+                    mask = torch.where(tt == index, torch.ones_like(tt), torch.zeros_like(tt))
+                    current_loss = torch.sum(value.detach() * mask)
+                    self.loss_mean[key][jj] += current_loss.item()
+                self.loss_count[jj] += mask.sum().item()
+
+            if self.current_iters % self.configs.train.log_freq[0] == 0:
+                if torch.any(self.loss_count == 0):
+                    self.loss_count += 1e-4
+                for key in loss.keys():
+                    self.loss_mean[key] /= self.loss_count
+                log_str = 'Train: {:06d}/{:06d}, Loss/MSE: '.format(
+                        self.current_iters,
+                        self.configs.train.iterations)
+                for jj, current_record in enumerate(record_steps):
+                    log_str += 't({:d}):{:.1e}/{:.1e}, '.format(
+                            current_record,
+                            self.loss_mean['loss'][jj].item(),
+                            self.loss_mean['mse'][jj].item(),
+                            )
+                log_str += 'lr:{:.2e}'.format(self.optimizer.param_groups[0]['lr'])
+                self.logger.info(log_str)
+                self.logging_metric(self.loss_mean, tag='Loss', phase=phase, add_global_step=True)
+            if self.current_iters % self.configs.train.log_freq[1] == 0:
+                self.logging_image(batch['lq'], tag='lq', phase=phase, add_global_step=False)
+                self.logging_image(batch['gt'], tag='gt', phase=phase, add_global_step=False)
+                x_t = self.base_diffusion.decode_first_stage(
+                        self.base_diffusion._scale_input(z_t, tt),
+                        self.autoencoder,
+                        )
+                self.logging_image(x_t, tag='diffused', phase=phase, add_global_step=False)
+                x0_pred = self.base_diffusion.decode_first_stage(
+                        z0_pred,
+                        self.autoencoder,
+                        )
+                self.logging_image(x0_pred, tag='x0-pred', phase=phase, add_global_step=True)
+
+            if self.current_iters % self.configs.train.save_freq == 1:
+                self.tic = time.time()
+            if self.current_iters % self.configs.train.save_freq == 0:
+                self.toc = time.time()
+                elaplsed = (self.toc - self.tic)
+                self.logger.info(f"Elapsed time: {elaplsed:.2f}s")
+                self.logger.info("="*100)
+
+    def validation(self, phase='val'):
+        if self.rank == 0:
+            if self.configs.train.use_ema_val:
+                self.reload_ema_model()
+                self.ema_model.eval()
+            else:
+                self.model.eval()
+
+            indices = np.linspace(
+                    0,
+                    self.base_diffusion.num_timesteps,
+                    self.base_diffusion.num_timesteps if self.base_diffusion.num_timesteps < 5 else 4,
+                    endpoint=False,
+                    dtype=np.int64,
+                    ).tolist()
+            if not (self.base_diffusion.num_timesteps-1) in indices:
+                indices.append(self.base_diffusion.num_timesteps-1)
+            batch_size = self.configs.train.batch[1]
+            num_iters_epoch = math.ceil(len(self.datasets[phase]) / batch_size)
+            mean_psnr = mean_lpips = 0
+            for ii, data in enumerate(self.dataloaders[phase]):
+                data = self.prepare_data(data, phase='val')
+                if 'gt' in data:
+                    im_lq, im_gt = data['lq'], data['gt']
+                else:
+                    im_lq = data['lq']
+                num_iters = 0
+                if self.configs.model.params.cond_lq:
+                    model_kwargs = {'lq':data['lq'],}
+                    if 'mask' in data:
+                        model_kwargs['mask'] = data['mask']
+                else:
+                    model_kwargs = None
+                tt = torch.tensor(
+                        [self.base_diffusion.num_timesteps, ]*im_lq.shape[0],
+                        dtype=torch.int64,
+                        ).cuda()
+                for sample in self.base_diffusion.p_sample_loop_progressive(
+                        y=im_lq,
+                        model=self.ema_model if self.configs.train.use_ema_val else self.model,
+                        first_stage_model=self.autoencoder,
+                        noise=None,
+                        clip_denoised=True if self.autoencoder is None else False,
+                        model_kwargs=model_kwargs,
+                        device=f"cuda:{self.rank}",
+                        progress=False,
+                        ):
+                    sample_decode = {}
+                    if num_iters in indices:
+                        for key, value in sample.items():
+                            if key in ['sample', ]:
+                                sample_decode[key] = self.base_diffusion.decode_first_stage(
+                                        value,
+                                        self.autoencoder,
+                                        ).clamp(-1.0, 1.0)
+                        im_sr_progress = sample_decode['sample']
+                        if num_iters + 1 == 1:
+                            im_sr_all = im_sr_progress
+                        else:
+                            im_sr_all = torch.cat((im_sr_all, im_sr_progress), dim=1)
+                    num_iters += 1
+                    tt -= 1
+
+                if 'gt' in data:
+                    mean_psnr += util_image.batch_PSNR(
+                            sample_decode['sample'] * 0.5 + 0.5,
+                            im_gt * 0.5 + 0.5,
+                            ycbcr=self.configs.train.val_y_channel,
+                            )
+                    mean_lpips += self.lpips_loss(
+                            sample_decode['sample'],
+                            im_gt,
+                            ).sum().item()
+
+                if (ii + 1) % self.configs.train.log_freq[2] == 0:
+                    self.logger.info(f'Validation: {ii+1:02d}/{num_iters_epoch:02d}...')
+
+                    im_sr_all = rearrange(im_sr_all, 'b (k c) h w -> (b k) c h w', c=im_lq.shape[1])
+                    self.logging_image(
+                            im_sr_all,
+                            tag='progress',
+                            phase=phase,
+                            add_global_step=False,
+                            nrow=len(indices),
+                            )
+                    if 'gt' in data:
+                        self.logging_image(im_gt, tag='gt', phase=phase, add_global_step=False)
+                    self.logging_image(im_lq, tag='lq', phase=phase, add_global_step=True)
+
+            if 'gt' in data:
+                mean_psnr /= len(self.datasets[phase])
+                mean_lpips /= len(self.datasets[phase])
+                self.logger.info(f'Validation Metric: PSNR={mean_psnr:5.2f}, LPIPS={mean_lpips:6.4f}...')
+                self.logging_metric(mean_psnr, tag='PSNR', phase=phase, add_global_step=False)
+                self.logging_metric(mean_lpips, tag='LPIPS', phase=phase, add_global_step=True)
+
+            self.logger.info("="*100)
+
+            if not (self.configs.train.use_ema_val and hasattr(self.configs.train, 'ema_rate')):
+                self.model.train()
+
 class TrainerDifIR(TrainerBase):
     def setup_optimizaton(self):
         super().setup_optimizaton()
@@ -481,7 +896,10 @@ class TrainerDifIR(TrainerBase):
         else:
             self.autoencoder = None
 
-        if self.configs.autoencoder.params.lora_tune_decoder or self.configs.autoencoder.tune_decoder:
+        if self.configs.autoencoder is not None and (
+            self.configs.autoencoder.params.lora_tune_decoder
+            or self.configs.autoencoder.tune_decoder
+        ):
             self.freeze_model(self.model)
 
         # LPIPS metric

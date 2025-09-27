@@ -472,6 +472,9 @@ class GaussianDiffusion:
                 z_sample = out["sample"]
 
     def decode_first_stage(self, z_sample, first_stage_model=None, consistencydecoder=None):
+        if first_stage_model is None:
+            return z_sample
+
         batch_size = z_sample.shape[0]
         data_dtype = z_sample.dtype
 
@@ -484,22 +487,20 @@ class GaussianDiffusion:
             decoder = consistencydecoder
             model_dtype = next(model.ckpt.parameters()).dtype
 
-        if first_stage_model is None:
-            return z_sample
+        z_sample = 1 / self.scale_factor * z_sample
+        if consistencydecoder is None:
+            out = decoder(z_sample.type(model_dtype))
         else:
-            z_sample = 1 / self.scale_factor * z_sample
-            if consistencydecoder is None:
-                out = decoder(z_sample.type(model_dtype))
-            else:
-                with th.cuda.amp.autocast():
-                    out = decoder(z_sample)
-            if not model_dtype == data_dtype:
-                out = out.type(data_dtype)
-            return out
+            with th.cuda.amp.autocast():
+                out = decoder(z_sample)
+        if not model_dtype == data_dtype:
+            out = out.type(data_dtype)
+        return out
 
     def encode_first_stage(self, y, first_stage_model, up_sample=False):
         data_dtype = y.dtype
-        model_dtype = next(first_stage_model.parameters()).dtype
+        model_dtype = data_dtype
+        # model_dtype = next(first_stage_model.parameters()).dtype
         if up_sample and self.sf != 1:
             y = F.interpolate(y, scale_factor=self.sf, mode='bicubic')
         if first_stage_model is None:
@@ -553,6 +554,7 @@ class GaussianDiffusion:
             model_kwargs = {}
 
         z_y = self.encode_first_stage(y, first_stage_model, up_sample=True)
+        model_kwargs['lq'] = z_y
         z_start = self.encode_first_stage(x_start, first_stage_model, up_sample=False)
 
         if noise is None:

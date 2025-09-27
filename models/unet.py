@@ -688,7 +688,8 @@ class UNetModelSwin(nn.Module):
 
         if cond_lq and lq_size == image_size:
             self.feature_extractor = nn.Identity()
-            base_chn = 4 if cond_mask else 3
+            # base_chn = 4 if cond_mask else 3
+            base_chn = 3 if cond_mask else 2
         else:
             feature_extractor = []
             feature_chn = 4 if cond_mask else 3

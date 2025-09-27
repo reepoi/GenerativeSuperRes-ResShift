@@ -1,0 +1,98 @@
+trainer:
+  target: trainer.TrainerNavierStokes
+
+autoencoder: ~
+
+model:
+  # batch_size: to try larger, look for swin transformer checkpointing
+  # # use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
+  target: models.unet.UNetModelSwin
+  #ckpt_path: /mnt/lustre/zsyue/projects/ResShift/SR/models/swin_v2/Esr256_ImageNet_rescale/S5_K2.0_P0.3/ema_ckpts/ema_model_300000.pth
+  ckpt_path: ~
+  params:
+    image_size: 256
+    in_channels: 2
+    model_channels: 160
+    out_channels: 2
+    # attention_resolutions: [512,256,128,64]
+    # attention_resolutions: [128,64,32,16]
+    attention_resolutions: [256,128,64,32]
+    dropout: 0
+    channel_mult: [1, 2, 2, 4]
+    num_res_blocks: [2, 2, 2, 2]
+    conv_resample: True
+    dims: 2
+    use_fp16: False
+    num_head_channels: 32
+    use_scale_shift_norm: True
+    resblock_updown: False
+    swin_depth: 2
+    swin_embed_dim: 192  # try reducing this to reduce param count
+    window_size: 8
+    mlp_ratio: 4
+    cond_lq: True
+    lq_size: 256
+
+diffusion:
+  target: models.script_util.create_gaussian_diffusion
+  params:
+    sf: 64
+    schedule_name: exponential
+    schedule_kwargs:
+      power: 0.3
+    etas_end: 0.99
+    steps: 4
+    min_noise_level: 0.2
+    kappa: 2.0
+    weighted_mse: False
+    predict_type: xstart
+    timestep_respacing: ~
+    scale_factor: 1.0
+    normalize_input: True
+    latent_flag: True
+
+data:
+  train:
+    type: navier_stokes_gled
+    params:
+      downsampler:
+        name: Gaussian
+        kernel_size: 129
+        sigma_scale: 0.4
+
+train:
+  # learning rate
+  lr: 5e-5                      # learning rate
+  lr_min: 2e-5                      # learning rate
+  lr_schedule: cosin
+  warmup_iterations: 5000
+  # dataloader
+  batch: [96, 8]
+  microbatch: 12
+  num_workers: 6
+  prefetch_factor: 2
+  # optimization settings
+  weight_decay: 0
+  ema_rate: 0.999
+  iterations: 400000            # total iterations
+  # save logging
+  save_freq: 10000
+  log_freq: [200, 2000, 1]         # [training loss, training images, val images]
+  # log_freq: [1, 1, 1]         # [training loss, training images, val images]
+  loss_coef: [1.0, 1.0]         # [mse, lpips]
+  local_logging: True           # manually save images
+  tf_logging: False             # tensorboard logging
+  # validation settings
+  use_ema_val: True
+  val_freq: ${train.save_freq}
+  val_y_channel: True
+  val_resolution: ${model.params.lq_size}
+  val_padding_mode: reflect
+  # training setting
+  use_amp: True                # amp training
+  seed: 123456                 # random seed
+  global_seeding: False
+  # model compile
+  compile:
+    flag: False
+    mode: reduce-overhead      # default, reduce-overhead

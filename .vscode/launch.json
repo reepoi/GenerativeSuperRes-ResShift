@@ -1,0 +1,27 @@
+{
+    "$schema": "https://raw.githubusercontent.com/mfussenegger/dapconfig-schema/master/dapconfig-schema.json",
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "python",
+            "request": "launch",
+            "name": "Inference",
+            "program": "/home/ttransue/GitHub/ResShift/inference_resshift.py",
+            "args": [
+                "-i arst",
+                "-o img_outputs",
+                "--task", "sr_navier_stokes"
+            ],
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "${input:gpu}"
+            }
+        }
+    ],
+    "inputs": [
+        {
+            "id": "gpu",
+            "type": "promptString",
+            "description": "Pick a GPU"
+        }
+    ]
+}

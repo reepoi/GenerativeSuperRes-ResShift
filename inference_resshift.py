@@ -69,7 +69,7 @@ def get_parser(**parser_kwargs):
             "--task",
             type=str,
             default="realsr",
-            choices=['realsr', 'bicsr', 'inpaint_imagenet', 'inpaint_face', 'faceir', 'deblur'],
+            choices=['realsr', 'bicsr', 'inpaint_imagenet', 'inpaint_face', 'faceir', 'deblur', 'sr_navier_stokes'],
             help="Chopping forward.",
             )
     args = parser.parse_args()
@@ -91,6 +91,12 @@ def get_configs(args):
         assert args.scale == 4, 'We only support the 4x super-resolution now!'
         ckpt_url = _LINK[args.version]
         ckpt_path = ckpt_dir / f'resshift_{args.task}x{args.scale}_s{_STEP[args.version]}_{args.version}.pth'
+        vqgan_url = _LINK['vqgan']
+        vqgan_path = ckpt_dir / f'autoencoder_vq_f4.pth'
+    elif args.task == 'sr_navier_stokes':
+        ckpt_dir = Path('/home/ttransue/out/ResShift/runs_no_hydra/2025-09-02-13-32/ckpts')
+        configs = OmegaConf.load('./configs/sr_swinunet_navier_stokes.yaml')
+        ckpt_path = ckpt_dir/'model_40000.pth'
         vqgan_url = _LINK['vqgan']
         vqgan_path = ckpt_dir / f'autoencoder_vq_f4.pth'
     elif args.task == 'bicsr':
@@ -149,7 +155,7 @@ def get_configs(args):
 
     configs.model.ckpt_path = str(ckpt_path)
     configs.diffusion.params.sf = args.scale
-    configs.autoencoder.ckpt_path = str(vqgan_path)
+    # configs.autoencoder.ckpt_path = str(vqgan_path)
 
     # save folder
     if not Path(args.out_path).exists():
@@ -194,13 +200,17 @@ def main():
     else:
         mask_path = None
 
-    resshift_sampler.inference(
-            args.in_path,
-            args.out_path,
-            mask_path=mask_path,
-            bs=args.bs,
-            noise_repeat=False
-            )
+    resshift_sampler.inference_navier_stokes(
+        Path(args.out_path),
+    )
+
+    # resshift_sampler.inference(
+    #         args.in_path,
+    #         args.out_path,
+    #         mask_path=mask_path,
+    #         bs=args.bs,
+    #         noise_repeat=False
+    #         )
 
 if __name__ == '__main__':
     main()
