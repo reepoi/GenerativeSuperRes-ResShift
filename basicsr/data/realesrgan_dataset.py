@@ -13,14 +13,14 @@ import albumentations
 import torch.nn.functional as F
 from torch.utils import data as data
 
-from basicsr.utils import DiffJPEG
-from basicsr.data.degradations import circular_lowpass_kernel, random_mixed_kernels
-from basicsr.data.transforms import augment
-from basicsr.utils import FileClient, get_root_logger, imfrombytes, img2tensor
-from basicsr.utils.registry import DATASET_REGISTRY
-from basicsr.utils.img_process_util import filter2D
-from basicsr.data.transforms import paired_random_crop
-from basicsr.data.degradations import random_add_gaussian_noise_pt, random_add_poisson_noise_pt
+from resshift.basicsr.utils import DiffJPEG
+from resshift.basicsr.data.degradations import circular_lowpass_kernel, random_mixed_kernels
+from resshift.basicsr.data.transforms import augment
+from resshift.basicsr.utils import FileClient, get_root_logger, imfrombytes, img2tensor
+from resshift.basicsr.utils.registry import DATASET_REGISTRY
+from resshift.basicsr.utils.img_process_util import filter2D
+from resshift.basicsr.data.transforms import paired_random_crop
+from resshift.basicsr.data.degradations import random_add_gaussian_noise_pt, random_add_poisson_noise_pt
 
 def readline_txt(txt_file):
     txt_file = [txt_file, ] if isinstance(txt_file, str) else txt_file

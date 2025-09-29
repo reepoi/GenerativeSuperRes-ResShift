@@ -15,14 +15,14 @@ from contextlib import nullcontext
 
 from datapipe.datasets import create_dataset
 
-from utils import util_net
-from utils import util_common
-from utils import util_image
+from resshift.utils import util_net
+from resshift.utils import util_common
+from resshift.utils import util_image
 
-from basicsr.utils import DiffJPEG, USMSharp
-from basicsr.utils.img_process_util import filter2D
-from basicsr.data.transforms import paired_random_crop
-from basicsr.data.degradations import random_add_gaussian_noise_pt, random_add_poisson_noise_pt
+from resshift.basicsr.utils import DiffJPEG, USMSharp
+from resshift.basicsr.utils.img_process_util import filter2D
+from resshift.basicsr.data.transforms import paired_random_crop
+from resshift.basicsr.data.degradations import random_add_gaussian_noise_pt, random_add_poisson_noise_pt
 
 import torch
 import torch.nn as nn
@@ -1093,7 +1093,7 @@ def my_worker_init_fn(worker_id):
     np.random.seed(np.random.get_state()[1][0] + worker_id)
 
 if __name__ == '__main__':
-    from utils import util_image
+    from resshift.utils import util_image
     from  einops import rearrange
     im1 = util_image.imread('./testdata/inpainting/val/places/Places365_val_00012685_crop000.png',
                             chn = 'rgb', dtype='float32')

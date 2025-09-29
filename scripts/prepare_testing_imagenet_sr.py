@@ -13,8 +13,8 @@ import argparse
 import numpy as np
 from omegaconf import OmegaConf
 
-from basicsr.data.realesrgan_dataset import RealESRGANDataset
-from utils import util_image
+from resshift.basicsr.data.realesrgan_dataset import RealESRGANDataset
+from resshift.utils import util_image
 
 def main():
     parser = argparse.ArgumentParser()

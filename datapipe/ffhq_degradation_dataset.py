@@ -12,11 +12,11 @@ import numpy as np
 import os.path as osp
 import torch
 import torch.utils.data as data
-from basicsr.data import degradations as degradations
-from basicsr.data.data_util import paths_from_folder
-from basicsr.data.transforms import augment
-from basicsr.utils import FileClient, get_root_logger, imfrombytes, img2tensor
-from basicsr.utils.registry import DATASET_REGISTRY
+from resshift.basicsr.data import degradations as degradations
+from resshift.basicsr.data.data_util import paths_from_folder
+from resshift.basicsr.data.transforms import augment
+from resshift.basicsr.utils import FileClient, get_root_logger, imfrombytes, img2tensor
+from resshift.basicsr.utils.registry import DATASET_REGISTRY
 from torchvision.transforms.functional import (
         adjust_brightness,
         adjust_contrast,
@@ -25,7 +25,7 @@ from torchvision.transforms.functional import (
         normalize
         )
 
-from utils import util_common
+from resshift.utils import util_common
 
 @DATASET_REGISTRY.register()
 class FFHQDegradationDataset(data.Dataset):

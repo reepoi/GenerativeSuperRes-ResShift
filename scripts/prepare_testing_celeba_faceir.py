@@ -12,8 +12,8 @@ import random
 import argparse
 import numpy as np
 
-from utils import util_image
-from utils import util_common
+from resshift.utils import util_image
+from resshift.utils import util_common
 
 from datapipe.face_degradation_testing import face_degradation
 

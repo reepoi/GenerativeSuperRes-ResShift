@@ -9,8 +9,8 @@ from pathlib import Path
 from omegaconf import OmegaConf
 from sampler import ResShiftSampler
 
-from utils.util_opts import str2bool
-from basicsr.utils.download_util import load_file_from_url
+from resshift.utils.util_opts import str2bool
+from resshift.basicsr.utils.download_util import load_file_from_url
 
 _STEP = {
     'v1': 15,

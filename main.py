@@ -5,8 +5,8 @@
 import argparse
 from omegaconf import OmegaConf
 
-from utils.util_common import get_obj_from_str
-from utils.util_opts import str2bool
+from resshift.utils.util_common import get_obj_from_str
+from resshift.utils.util_opts import str2bool
 
 def get_parser(**parser_kwargs):
     parser = argparse.ArgumentParser(**parser_kwargs)

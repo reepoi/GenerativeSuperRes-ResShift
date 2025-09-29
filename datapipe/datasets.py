@@ -9,12 +9,12 @@ from functools import partial
 import torchvision as thv
 from torch.utils.data import Dataset
 
-from utils import util_sisr
-from utils import util_image
-from utils import util_common
+from resshift.utils import util_sisr
+from resshift.utils import util_image
+from resshift.utils import util_common
 
-from basicsr.data.transforms import augment
-from basicsr.data.realesrgan_dataset import RealESRGANDataset
+from resshift.basicsr.data.transforms import augment
+from resshift.basicsr.data.realesrgan_dataset import RealESRGANDataset
 from .ffhq_degradation_dataset import FFHQDegradationDataset
 from .degradation_bsrgan.bsrgan_light import degradation_bsrgan_variant, degradation_bsrgan
 from .masks import MixedMaskGenerator
