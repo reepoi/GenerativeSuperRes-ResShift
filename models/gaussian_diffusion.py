@@ -499,7 +499,10 @@ class GaussianDiffusion:
 
     def encode_first_stage(self, y, first_stage_model, up_sample=False):
         data_dtype = y.dtype
-        model_dtype = next(first_stage_model.parameters()).dtype
+        if first_stage_model is None:
+            model_dtype = data_dtype
+        else:
+            model_dtype = next(first_stage_model.parameters()).dtype
         if up_sample and self.sf != 1:
             y = F.interpolate(y, scale_factor=self.sf, mode='bicubic')
         if first_stage_model is None:
@@ -553,6 +556,7 @@ class GaussianDiffusion:
             model_kwargs = {}
 
         z_y = self.encode_first_stage(y, first_stage_model, up_sample=True)
+        model_kwargs['lq'] = z_y
         z_start = self.encode_first_stage(x_start, first_stage_model, up_sample=False)
 
         if noise is None:
