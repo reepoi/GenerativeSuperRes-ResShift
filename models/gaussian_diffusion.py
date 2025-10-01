@@ -555,7 +555,7 @@ class GaussianDiffusion:
         if model_kwargs is None:
             model_kwargs = {}
 
-        z_y = self.encode_first_stage(y, first_stage_model, up_sample=True)
+        z_y = self.encode_first_stage(y, first_stage_model, up_sample=False)
         model_kwargs['lq'] = z_y
         z_start = self.encode_first_stage(x_start, first_stage_model, up_sample=False)
 
